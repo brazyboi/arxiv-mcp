@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["mcp[cli]", "arxiv"]
+# dependencies = ["mcp[cli]", "arxiv", "chromadb", "sentence-transformers"]
 # ///
 
 import arxiv
