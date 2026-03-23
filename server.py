@@ -5,12 +5,17 @@
 import arxiv
 import json
 import sqlite3
+import chromadb
 from pathlib import Path
+from sentence_transformers import SentenceTransformer
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("arxiv-mcp")
 
 DB_PATH = Path(__file__).parent / "reading_list.db"
+CHROMA_PATH = Path(__file__).parent / "chroma_db"
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
 def get_db():
     conn = sqlite3.connect(DB_PATH)
@@ -29,6 +34,10 @@ def get_db():
     """)
     conn.commit()
     return conn
+
+def get_chroma():
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    return client.get_or_create_collection("papers")
 
 @mcp.tool()
 def search_papers(query: str, max_results: int = 5) -> str:
@@ -97,6 +106,15 @@ def save_paper(arxiv_id: str) -> str:
             paper.pdf_url,
         ))
 
+    text_to_embed = f"{paper.title}\n\n{paper.summary}"
+    embedding = embedder.encode(text_to_embed).tolist()
+    collection = get_chroma()
+    collection.upsert(
+        ids=[arxiv_id],
+        embeddings=[embedding],
+        metadatas=[{"title": paper.title, "published": str(paper.published.date())}]
+    )
+
     return f"Saved '{paper.title}' to reading list."
 
 @mcp.tool()
@@ -126,6 +144,39 @@ def add_note(arxiv_id: str, note: str) -> str:
         return f"Paper {arxiv_id} isn't in your reading list yet. Save it first."
 
     return f"Note updated for {arxiv_id}."
+
+@mcp.tool()
+def semantic_search(query: str, n_results: int = 5) -> str:
+    """Search your saved papers by meaning, not just keywords.
+    
+    Unlike search_papers (which queries all of arXiv), this only searches
+    papers you've saved locally and finds them by conceptual similarity.
+    """
+    embedding = embedder.encode(query).tolist()
+
+    collection = get_chroma()
+    if collection.count() == 0:
+        return "No papers indexed yet. Save some papers first."
+
+    results = collection.query(
+        query_embeddings=[embedding],
+        n_results=min(n_results, collection.count()),
+    )
+
+    papers = []
+    for arxiv_id, distance, metadata in zip(
+        results["ids"][0],
+        results["distances"][0],
+        results["metadatas"][0],
+    ):
+        papers.append({
+            "arxiv_id": arxiv_id,
+            "title": metadata["title"],
+            "published": metadata["published"],
+            "similarity": round(1 - distance, 3),
+        })
+
+    return json.dumps(papers, indent=2)
 
 if __name__ == "__main__":
     mcp.run()
